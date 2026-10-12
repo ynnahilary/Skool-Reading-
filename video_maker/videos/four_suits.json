@@ -1,0 +1,17 @@
+{
+  "title": ["TAROT SCHOOL:", "THE FOUR SUITS EXPLAINED"],
+  "card": "assets/four_suits_card.webp",
+  "voice": "af_heart",
+  "speed": 1.0,
+  "script": [
+    "Here's tarot without the overwhelm.",
+    "Cups invite you to notice feelings and relationships.",
+    "Wands point to energy, creativity and action.",
+    "Swords ask you to examine thoughts, choices and conflict.",
+    "Pentacles bring you back to everyday life: work, money and practical priorities.",
+    "Together, they're four different lenses for understanding what's happening in your life.",
+    "Once you learn the suits, reading tarot starts to feel much less mysterious.",
+    "Save this for your next reading."
+  ],
+  "output": "four_suits.mp4"
+}
