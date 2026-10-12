@@ -1,2 +1,4 @@
 cache/
 series/out/
+__pycache__/
+*_words.json
