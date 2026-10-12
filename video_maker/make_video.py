@@ -75,18 +75,32 @@ def align(script_words, heard):
     return times
 
 
-def make_voiceover(paragraphs, voice, speed, out_wav):
+_models = {}
+
+
+def voice_style(tts, voice):
+    """'af_heart' or a blend like 'af_heart:0.7,af_nicole:0.3'."""
+    if ":" not in voice:
+        return voice
+    parts = [v.split(":") for v in voice.split(",")]
+    return sum(tts.get_voice_style(name) * float(w) for name, w in parts)
+
+
+def make_voiceover(paragraphs, voice, speed, out_wav, gap=0.45):
     from faster_whisper import WhisperModel
-    tts = kokoro()
-    stt = WhisperModel("small.en", compute_type="int8")
+    if not _models:
+        _models["tts"] = kokoro()
+        _models["stt"] = WhisperModel("small.en", compute_type="int8")
+    tts, stt = _models["tts"], _models["stt"]
     lang = "en-gb" if voice.startswith("b") else "en-us"
-    lead, gap, tail = 0.4, 0.45, 1.2
+    style = voice_style(tts, voice)
+    lead, tail = 0.8, 2.0
 
     pieces = [np.zeros(int(lead * SR), np.float32)]
     t = lead
     words = []  # (text, start, end, para_index)
     for p, text in enumerate(paragraphs):
-        audio, sr = tts.create(text, voice=voice, speed=speed, lang=lang)
+        audio, sr = tts.create(text, voice=style, speed=speed, lang=lang)
         assert sr == SR
         audio = audio.astype(np.float32)
         a16 = np.interp(np.arange(0, len(audio), SR / 16000), np.arange(len(audio)), audio)
@@ -268,93 +282,124 @@ def render_card(path, box_w=720, box_h=1040, top=320):
     return layer, top + card.height
 
 
-def bg_video_frames(path, n):
-    """Yield n frames from a background clip, cropped to fill and looped."""
-    vf = f"scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},fps={FPS}"
-    while True:
-        p = subprocess.Popen(["ffmpeg", "-v", "error", "-i", path, "-vf", vf, "-f", "rawvideo",
-                              "-pix_fmt", "rgb24", "-"], stdout=subprocess.PIPE)
-        while True:
-            buf = p.stdout.read(W * H * 3)
-            if len(buf) < W * H * 3:
-                break
-            yield np.frombuffer(buf, np.uint8).reshape(H, W, 3).astype(np.float32) / 255
-            n -= 1
-            if n <= 0:
-                p.kill()
-                return
-        p.wait()
+# ---------------------------------------------------------------- render
+
+CACHE = os.path.join(HERE, "cache")
+LOOP_SECONDS = 60
 
 
-# ---------------------------------------------------------------- main
+def galaxy_loop(path, seed=7):
+    """Render a seamlessly looping galaxy clip once; every video reuses it."""
+    if os.path.exists(path):
+        return path
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    print("rendering galaxy loop (one time)...")
+    gh, gw = int(H * 1.12), int(W * 1.12)
+    neb, tw_a, tw_b = galaxy(gh, gw, seed)
+    to_img = lambda a: Image.fromarray((np.clip(a, 0, 1) * 255).astype(np.uint8))
+    neb_i, ta_i, tb_i = to_img(neb), to_img(tw_a), to_img(tw_b)
+    n = LOOP_SECONDS * FPS
+    ff = subprocess.Popen([
+        "ffmpeg", "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgb24",
+        "-s", f"{W}x{H}", "-r", str(FPS), "-i", "-",
+        "-c:v", "libx264", "-preset", "slow", "-crf", "16", "-pix_fmt", "yuv420p", path,
+    ], stdin=subprocess.PIPE)
+    for f in range(n):
+        p = 2 * np.pi * f / n                       # one full cycle -> loops cleanly
+        z = 1.03 - 0.03 * np.cos(p)                 # gentle breathe in and out
+        ox = (gw - W / z) / 2 + 22 * np.sin(p)
+        oy = (gh - H / z) / 2 + 30 * np.sin(p + 1)
+        m = (1 / z, 0, ox, 0, 1 / z, oy)
+        warp = lambda im: np.asarray(im.transform((W, H), Image.AFFINE, m, Image.BILINEAR),
+                                     np.float32) / 255
+        wa = .55 + .45 * np.sin(p * 19)
+        wb = .55 + .45 * np.sin(p * 15 + 2)
+        frame = np.minimum(warp(neb_i) + warp(ta_i)[..., None] * wa
+                           + warp(tb_i)[..., None] * wb, 1)
+        ff.stdin.write((frame * 255 + .5).astype(np.uint8).tobytes())
+    ff.stdin.close()
+    ff.wait()
+    return path
+
+
+def music_track(path, seconds=240):
+    if not os.path.exists(path):
+        from music import make_music
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        print("composing music (one time)...")
+        make_music(path, seconds)
+    return path
+
+
+def split_sentences(text):
+    text = text.replace("\u2019", "'").replace("\u2018", "'")
+    parts = re.split(r"(?<=[.?!])\s+|(?<=[.?!]['\"])\s+", text.strip())
+    return [p for p in parts if p]
+
+
+def title_lines(title, max_w=920):
+    title = title.replace("\u2019", "'").upper()
+    if ":" in title:
+        a, b = title.split(":", 1)
+        return [a.strip() + ":", b.strip()]
+    font = ImageFont.truetype(TITLE_FONT, 74)
+    if font.getlength(title) <= max_w:
+        return [title]
+    words = title.split()
+    best = min(range(1, len(words)), key=lambda i: abs(
+        font.getlength(" ".join(words[:i])) - font.getlength(" ".join(words[i:]))))
+    return [" ".join(words[:best]), " ".join(words[best:])]
+
+
+def render_video(title, card_path, sentences, out, voice="af_heart", speed=1.0,
+                 gap=0.45, background=None, music=True, music_volume=0.16):
+    tmp = tempfile.mkdtemp()
+    wav = os.path.join(tmp, "voice.wav")
+    print(f"[{os.path.basename(out)}] voiceover...")
+    words, dur = make_voiceover(sentences, voice, speed, wav, gap=gap)
+    ass = os.path.join(tmp, "captions.ass")
+    lines = title if isinstance(title, list) else title_lines(title)
+    card, card_bottom = render_card(card_path)
+    write_ass(words, ass, y=card_bottom + 70)
+    fg_png = os.path.join(tmp, "fg.png")
+    Image.alpha_composite(card, render_title(lines)).save(fg_png)
+    json.dump(words, open(os.path.splitext(out)[0] + "_words.json", "w"), indent=1)
+
+    bg = background or galaxy_loop(os.path.join(CACHE, "galaxy_loop.mp4"))
+    cmd = ["ffmpeg", "-v", "error", "-y", "-stream_loop", "-1", "-i", bg,
+           "-loop", "1", "-i", fg_png, "-i", wav]
+    ass_esc = ass.replace(":", "\\:")
+    vf = (f"[0:v]scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},"
+          f"fps={FPS},setsar=1[bg];[bg][1:v]overlay=0:0:format=auto,"
+          f"ass={ass_esc}:fontsdir={os.path.expanduser('~/.fonts')}[v]")
+    voice_chain = "[2:a]aresample=48000,highshelf=f=6500:g=-4,lowshelf=f=180:g=1.5,"\
+                  "dynaudnorm=f=250:g=15:p=0.85,aformat=channel_layouts=stereo[vo]"
+    if music:
+        cmd += ["-i", music_track(os.path.join(CACHE, "ambient.wav"))]
+        af = (f"{voice_chain};[3:a]atrim=0:{dur:.2f},afade=t=out:st={dur - 2.5:.2f}:d=2.5,"
+              f"volume={music_volume}[mu];[vo][mu]amix=inputs=2:duration=first:normalize=0[a]")
+    else:
+        af = voice_chain.replace("[vo]", "[a]")
+    cmd += ["-filter_complex", vf + ";" + af, "-map", "[v]", "-map", "[a]", "-t", f"{dur:.2f}",
+            "-c:v", "libx264", "-preset", "medium", "-crf", "19", "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", out]
+    print(f"[{os.path.basename(out)}] encoding {dur:.1f}s...")
+    subprocess.run(cmd, check=True)
+    return out
+
 
 def main(cfg_path):
     cfg = json.load(open(cfg_path))
     base = os.path.dirname(os.path.abspath(cfg_path))
     rel = lambda p: p if os.path.isabs(p) else os.path.join(base, p)
     out = rel(cfg.get("output", os.path.splitext(os.path.basename(cfg_path))[0] + ".mp4"))
-    tmp = tempfile.mkdtemp()
-
-    paragraphs = [p.strip() for p in cfg["script"] if p.strip()]
-    wav = os.path.join(tmp, "voice.wav")
-    print("voiceover...")
-    words, dur = make_voiceover(paragraphs, cfg.get("voice", "af_heart"),
-                                cfg.get("speed", 1.0), wav)
-    ass = os.path.join(tmp, "captions.ass")
-    title = render_title(cfg["title"])
-    card, card_bottom = render_card(rel(cfg["card"]))
-    write_ass(words, ass, y=card_bottom + 70)
-    json.dump(words, open(os.path.splitext(out)[0] + "_words.json", "w"), indent=1)
-
-    fg = Image.alpha_composite(card, title)
-    fg = np.asarray(fg, np.float32) / 255
-    fg_rgb, fg_a = fg[..., :3], fg[..., 3:]
-    n = int(dur * FPS)
-
-    if cfg.get("background"):
-        frames = bg_video_frames(rel(cfg["background"]), n)
-    else:
-        print("galaxy...")
-        gh, gw = int(H * 1.12), int(W * 1.12)
-        neb, tw_a, tw_b = galaxy(gh, gw, cfg.get("seed", 7))
-        neb_i = Image.fromarray((neb * 255).astype(np.uint8))
-        ta_i = Image.fromarray((np.clip(tw_a, 0, 1) * 255).astype(np.uint8))
-        tb_i = Image.fromarray((np.clip(tw_b, 0, 1) * 255).astype(np.uint8))
-
-        def gen():
-            for f in range(n):
-                t = f / FPS
-                k = f / max(n - 1, 1)
-                z = 1.0 + 0.06 * k                     # slow push in
-                ox = (gw - W / z) / 2 + 20 * np.sin(k * np.pi)
-                oy = (gh - H / z) / 2 - 30 * (k - .5)
-                m = (1 / z, 0, ox, 0, 1 / z, oy)
-                bg = np.asarray(neb_i.transform((W, H), Image.AFFINE, m, Image.BILINEAR),
-                                np.float32) / 255
-                a = np.asarray(ta_i.transform((W, H), Image.AFFINE, m, Image.BILINEAR),
-                               np.float32)[..., None] / 255
-                b = np.asarray(tb_i.transform((W, H), Image.AFFINE, m, Image.BILINEAR),
-                               np.float32)[..., None] / 255
-                wa = .55 + .45 * np.sin(t * 2.1)
-                wb = .55 + .45 * np.sin(t * 1.7 + 2)
-                yield np.minimum(bg + a * wa + b * wb, 1)
-        frames = gen()
-
-    print(f"rendering {n} frames ({dur:.1f}s)...")
-    ass_esc = ass.replace(":", "\\:")
-    ff = subprocess.Popen([
-        "ffmpeg", "-v", "error", "-y",
-        "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{W}x{H}", "-r", str(FPS), "-i", "-",
-        "-i", wav,
-        "-vf", f"ass={ass_esc}:fontsdir={os.path.expanduser('~/.fonts')}",
-        "-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p",
-        "-c:a", "aac", "-b:a", "192k", "-shortest", "-movflags", "+faststart", out,
-    ], stdin=subprocess.PIPE)
-    for frame in frames:
-        comp = frame * (1 - fg_a) + fg_rgb * fg_a
-        ff.stdin.write((comp * 255 + .5).astype(np.uint8).tobytes())
-    ff.stdin.close()
-    ff.wait()
+    script = cfg["script"]
+    sentences = split_sentences(script) if isinstance(script, str) else script
+    render_video(cfg["title"], rel(cfg["card"]), sentences, out,
+                 voice=cfg.get("voice", "af_heart"), speed=cfg.get("speed", 1.0),
+                 gap=cfg.get("gap", 0.45),
+                 background=rel(cfg["background"]) if cfg.get("background") else None,
+                 music=cfg.get("music", True))
     print("wrote", out)
 
 

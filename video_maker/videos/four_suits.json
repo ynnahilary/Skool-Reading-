@@ -1,6 +1,6 @@
 {
   "title": ["TAROT SCHOOL:", "THE FOUR SUITS EXPLAINED"],
-  "card": "assets/four_suits_card.webp",
+  "card": "../series/cards/day04_card.webp",
   "voice": "af_heart",
   "speed": 1.0,
   "script": [
