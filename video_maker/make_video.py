@@ -200,7 +200,19 @@ def fbm(h, w, rng, scales, weights):
     return out / out.max()
 
 
-def galaxy(h, w, seed=7):
+# Nebula colour themes: base, main cloud, left cloud, bright band, filaments.
+PALETTES = {
+    "amethyst": [(6, 4, 22), (110, 50, 215), (50, 60, 235), (240, 85, 220), (200, 140, 255)],
+    "ocean":    [(2, 8, 22), (20, 90, 170), (10, 150, 170), (60, 200, 230), (150, 230, 255)],
+    "emerald":  [(2, 12, 14), (15, 110, 95), (20, 70, 140), (90, 210, 150), (170, 255, 210)],
+    "rose":     [(16, 4, 14), (170, 40, 100), (90, 40, 160), (255, 120, 150), (255, 190, 210)],
+    "sunset":   [(16, 5, 10), (170, 50, 40), (110, 30, 110), (255, 150, 60), (255, 210, 140)],
+    "midnight": [(2, 4, 16), (35, 50, 150), (20, 25, 90), (110, 130, 255), (190, 200, 255)],
+    "aurora":   [(3, 8, 18), (20, 120, 120), (70, 40, 170), (120, 230, 120), (210, 170, 255)],
+}
+
+
+def galaxy(h, w, seed=7, palette="amethyst"):
     """A purple/pink/blue nebula still, plus two twinkle star layers."""
     rng = np.random.default_rng(seed)
     yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
@@ -218,11 +230,12 @@ def galaxy(h, w, seed=7):
     blue = cloud(.32, 1.2) * np.clip(1.25 - xn * 1.3, 0, 1)
     filament = (1 - np.abs(2 * fbm(h, w, rng, sc, wt) - 1)) ** 3 * (.3 + band)
 
-    img = np.zeros((h, w, 3), np.float32) + np.array([6, 4, 22]) / 255
-    img += violet[..., None] * np.array([110, 50, 215]) / 255 * 1.1
-    img += blue[..., None] * np.array([50, 60, 235]) / 255 * .9
-    img += pink[..., None] * np.array([240, 85, 220]) / 255 * 1.1
-    img += (filament * violet)[..., None] * np.array([200, 140, 255]) / 255 * .5
+    base, c_main, c_left, c_band, c_fil = (np.array(c) / 255 for c in PALETTES[palette])
+    img = np.zeros((h, w, 3), np.float32) + base
+    img += violet[..., None] * c_main * 1.1
+    img += blue[..., None] * c_left * .9
+    img += pink[..., None] * c_band * 1.1
+    img += (filament * violet)[..., None] * c_fil * .5
 
     density = .15 + violet + pink + blue
 
@@ -288,14 +301,14 @@ CACHE = os.path.join(HERE, "cache")
 LOOP_SECONDS = 60
 
 
-def galaxy_loop(path, seed=7):
+def galaxy_loop(path, seed=7, palette="amethyst"):
     """Render a seamlessly looping galaxy clip once; every video reuses it."""
     if os.path.exists(path):
         return path
     os.makedirs(os.path.dirname(path), exist_ok=True)
     print("rendering galaxy loop (one time)...")
     gh, gw = int(H * 1.12), int(W * 1.12)
-    neb, tw_a, tw_b = galaxy(gh, gw, seed)
+    neb, tw_a, tw_b = galaxy(gh, gw, seed, palette)
     to_img = lambda a: Image.fromarray((np.clip(a, 0, 1) * 255).astype(np.uint8))
     neb_i, ta_i, tb_i = to_img(neb), to_img(tw_a), to_img(tw_b)
     n = LOOP_SECONDS * FPS
@@ -352,7 +365,8 @@ def title_lines(title, max_w=920):
 
 
 def render_video(title, card_path, sentences, out, voice="af_heart", speed=1.0,
-                 gap=0.45, background=None, music=True, music_volume=0.16):
+                 gap=0.45, background=None, music=True, music_volume=0.16,
+                 palette="amethyst"):
     tmp = tempfile.mkdtemp()
     wav = os.path.join(tmp, "voice.wav")
     print(f"[{os.path.basename(out)}] voiceover...")
@@ -365,7 +379,8 @@ def render_video(title, card_path, sentences, out, voice="af_heart", speed=1.0,
     Image.alpha_composite(card, render_title(lines)).save(fg_png)
     json.dump(words, open(os.path.splitext(out)[0] + "_words.json", "w"), indent=1)
 
-    bg = background or galaxy_loop(os.path.join(CACHE, "galaxy_loop.mp4"))
+    bg = background or galaxy_loop(os.path.join(CACHE, f"galaxy_{palette}.mp4"),
+                                   palette=palette)
     cmd = ["ffmpeg", "-v", "error", "-y", "-stream_loop", "-1", "-i", bg,
            "-loop", "1", "-i", fg_png, "-i", wav]
     ass_esc = ass.replace(":", "\\:")

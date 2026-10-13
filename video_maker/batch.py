@@ -4,6 +4,8 @@
 Cards live in series/cards/dayNN_card.(png|webp|jpg); videos go to
 series/out/dayNN_V.mp4. Existing videos and days without a card are skipped.
 
+Background colours rotate by day through the "palettes" list in settings.json.
+
 Usage: python3 batch.py            # everything that has a card
        python3 batch.py 4 5        # only these days
 """
@@ -21,6 +23,7 @@ SERIES = os.path.join(HERE, "series")
 
 def main(days):
     settings = json.load(open(os.path.join(SERIES, "settings.json")))
+    palettes = settings.pop("palettes", ["amethyst"])
     rows = list(csv.DictReader(open(os.path.join(SERIES, "scripts.csv"), encoding="utf-8-sig")))
     done, skipped = [], set()
     for r in rows:
@@ -34,7 +37,8 @@ def main(days):
         out = os.path.join(SERIES, "out", f"day{day:02d}_{vid}.mp4")
         if os.path.exists(out):
             continue
-        render_video(r["Title"], cards[0], split_sentences(r["Script"]), out, **settings)
+        render_video(r["Title"], cards[0], split_sentences(r["Script"]), out,
+                     palette=palettes[(day - 1) % len(palettes)], **settings)
         done.append(out)
     print(f"rendered {len(done)} videos")
     if skipped:

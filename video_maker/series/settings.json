@@ -3,5 +3,14 @@
   "speed": 0.88,
   "gap": 0.8,
   "music": true,
-  "music_volume": 0.16
+  "music_volume": 0.16,
+  "palettes": [
+    "amethyst",
+    "ocean",
+    "emerald",
+    "rose",
+    "sunset",
+    "midnight",
+    "aurora"
+  ]
 }
