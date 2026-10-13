@@ -315,7 +315,8 @@ def galaxy_loop(path, seed=7, palette="amethyst"):
     ff = subprocess.Popen([
         "ffmpeg", "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgb24",
         "-s", f"{W}x{H}", "-r", str(FPS), "-i", "-",
-        "-c:v", "libx264", "-preset", "slow", "-crf", "16", "-pix_fmt", "yuv420p", path,
+        "-c:v", "libx264", "-preset", "slow", "-crf", "16", "-pix_fmt", "yuv420p",
+        "-f", "mp4", path + ".part",
     ], stdin=subprocess.PIPE)
     for f in range(n):
         p = 2 * np.pi * f / n                       # one full cycle -> loops cleanly
@@ -331,7 +332,9 @@ def galaxy_loop(path, seed=7, palette="amethyst"):
                            + warp(tb_i)[..., None] * wb, 1)
         ff.stdin.write((frame * 255 + .5).astype(np.uint8).tobytes())
     ff.stdin.close()
-    ff.wait()
+    if ff.wait() != 0:
+        raise RuntimeError("galaxy render failed")
+    os.replace(path + ".part", path)
     return path
 
 
